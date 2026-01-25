@@ -44,11 +44,20 @@ typedef enum avifAppFileFormat
     AVIF_APP_FILE_FORMAT_Y4M
 } avifAppFileFormat;
 
+char * avifFileFormatToString(avifAppFileFormat format);
+
 // Guesses the format of a file by looking at the first bytes, or at the extension if the file
 // can't be read or is empty.
 avifAppFileFormat avifGuessFileFormat(const char * filename);
 // Guesses the format of a buffer by looking at the first bytes.
 avifAppFileFormat avifGuessBufferFileFormat(const uint8_t * data, size_t size);
+
+// Returns the best cell size for a given horizontal or vertical dimension.
+avifBool avifGetBestCellSize(const char * dimensionStr, uint32_t numPixels, uint32_t numCells, avifBool isSubsampled, uint32_t * cellSize);
+
+// Splits an image into a grid of cells, including its gain map, if any.
+// The returned cells must be destroyed with avifImageDestroy().
+avifBool avifImageSplitGrid(const avifImage * gridSplitImage, uint32_t gridCols, uint32_t gridRows, avifImage ** gridCells);
 
 // This structure holds any timing data coming from source (typically non-AVIF) inputs being fed
 // into avifenc. If either or both values are 0, the timing is "invalid" / sentinel and the values
@@ -62,20 +71,25 @@ typedef struct avifAppSourceTiming
 
 struct y4mFrameIterator;
 // Reads an image from a file with the requested format and depth.
+// If 'inputFormat' is AVIF_APP_FILE_FORMAT_UNKNOWN, the image format is guessed
+// based on the filename or first few bytes.
 // At most imageSizeLimit pixels will be read or an error returned.
 // In case of a y4m file, sourceTiming and frameIter can be set.
-// Returns AVIF_APP_FILE_FORMAT_UNKNOWN in case of error.
+// Returns the format of the file, or AVIF_APP_FILE_FORMAT_UNKNOWN in case of
+// error.
 // 'ignoreGainMap' is only relevant for jpeg files that have a gain map
 // and only if AVIF_ENABLE_JPEG_GAIN_MAP_CONVERSION is ON
 // (requires libxml2). Otherwise it has no effect.
+// May set the image's colorPrimaries, transferCharacteristics and ICC fields
+// based on color information found in the image (unless ignoreColorProfile is true).
 avifAppFileFormat avifReadImage(const char * filename,
+                                avifAppFileFormat inputFormat,
                                 avifPixelFormat requestedFormat,
                                 int requestedDepth,
                                 avifChromaDownsampling chromaDownsampling,
                                 avifBool ignoreColorProfile,
                                 avifBool ignoreExif,
                                 avifBool ignoreXMP,
-                                avifBool allowChangingCicp,
                                 avifBool ignoreGainMap,
                                 uint32_t imageSizeLimit,
                                 avifImage * image,

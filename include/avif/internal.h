@@ -150,11 +150,11 @@ void avifImageCopyNoAlloc(avifImage * dstImage, const avifImage * srcImage);
 void avifImageCopySamples(avifImage * dstImage, const avifImage * srcImage, avifPlanesFlags planes);
 
 // Appends an opaque image item property.
-AVIF_API avifResult avifImagePushProperty(avifImage * image,
-                                          const uint8_t boxtype[4],
-                                          const uint8_t usertype[16],
-                                          const uint8_t * boxPayload,
-                                          size_t boxPayloadSize);
+avifResult avifImagePushProperty(avifImage * image,
+                                 const uint8_t boxtype[4],
+                                 const uint8_t usertype[16],
+                                 const uint8_t * boxPayload,
+                                 size_t boxPayloadSize);
 
 // Check if the FourCC property value is a known value
 AVIF_NODISCARD avifBool avifIsKnownPropertyType(const uint8_t boxtype[4]);
@@ -163,7 +163,6 @@ AVIF_NODISCARD avifBool avifIsValidUUID(const uint8_t uuid[16]);
 
 // ---------------------------------------------------------------------------
 
-#if defined(AVIF_ENABLE_EXPERIMENTAL_SAMPLE_TRANSFORM)
 // Mapping used in the coding of Sample Transform metadata.
 typedef enum avifSampleTransformBitDepth
 {
@@ -240,8 +239,6 @@ avifResult avifImageApplyOperations(avifImage * dstImage,
                                     uint8_t numInputImageItems,
                                     const avifImage * inputImageItems[],
                                     avifPlanesFlags planes);
-
-#endif // AVIF_ENABLE_EXPERIMENTAL_SAMPLE_TRANSFORM
 
 // ---------------------------------------------------------------------------
 // Alpha
@@ -405,20 +402,17 @@ typedef enum avifItemCategory
     AVIF_ITEM_COLOR,
     AVIF_ITEM_ALPHA,
     AVIF_ITEM_GAIN_MAP,
-#if defined(AVIF_ENABLE_EXPERIMENTAL_SAMPLE_TRANSFORM)
     AVIF_ITEM_SAMPLE_TRANSFORM, // Sample Transform derived image item 'sato'.
     // Extra input image items for AVIF_ITEM_SAMPLE_TRANSFORM. "Extra" because AVIF_ITEM_COLOR could be one too.
     AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_COLOR,
     AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_1_COLOR,
     AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_ALPHA,
     AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_1_ALPHA,
-#endif
     AVIF_ITEM_CATEGORY_COUNT
 } avifItemCategory;
 
 avifBool avifIsAlpha(avifItemCategory itemCategory);
 
-#if defined(AVIF_ENABLE_EXPERIMENTAL_SAMPLE_TRANSFORM)
 // AVIF allows up to 32 inputs for sample transforms but we only support a smaller number.
 #define AVIF_SAMPLE_TRANSFORM_MAX_NUM_EXTRA_INPUT_IMAGE_ITEMS \
     (AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_ALPHA - AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_COLOR)
@@ -428,7 +422,6 @@ avifBool avifIsAlpha(avifItemCategory itemCategory);
 #define AVIF_SAMPLE_TRANSFORM_MIN_CATEGORY AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_COLOR
 #define AVIF_SAMPLE_TRANSFORM_MAX_CATEGORY \
     (AVIF_ITEM_SAMPLE_TRANSFORM_INPUT_0_ALPHA + AVIF_SAMPLE_TRANSFORM_MAX_NUM_EXTRA_INPUT_IMAGE_ITEMS - 1)
-#endif
 
 // ---------------------------------------------------------------------------
 // Grid AVIF images
@@ -551,8 +544,8 @@ typedef enum avifEncoderChange
     AVIF_ENCODER_CHANGE_MAX_QUANTIZER_ALPHA = (1 << 3),
     AVIF_ENCODER_CHANGE_TILE_ROWS_LOG2 = (1 << 4),
     AVIF_ENCODER_CHANGE_TILE_COLS_LOG2 = (1 << 5),
-    AVIF_ENCODER_CHANGE_QUANTIZER = (1 << 6),
-    AVIF_ENCODER_CHANGE_QUANTIZER_ALPHA = (1 << 7),
+    AVIF_ENCODER_CHANGE_QUALITY = (1 << 6),
+    AVIF_ENCODER_CHANGE_QUALITY_ALPHA = (1 << 7),
     AVIF_ENCODER_CHANGE_SCALING_MODE = (1 << 8),
 
     AVIF_ENCODER_CHANGE_CODEC_SPECIFIC = (1 << 30)
@@ -572,10 +565,10 @@ typedef avifBool (*avifCodecGetNextImageFunc)(struct avifCodec * codec,
 // encoder->tileRowsLog2, encoder->tileColsLog2, and encoder->autoTiling. The caller of
 // avifCodecEncodeImageFunc is responsible for automatic tiling if encoder->autoTiling is set to
 // AVIF_TRUE. The actual tiling values are passed to avifCodecEncodeImageFunc as parameters.
-// Similarly, avifCodecEncodeImageFunc should use the quantizer parameter instead of
-// encoder->quality and encoder->qualityAlpha. If disableLaggedOutput is AVIF_TRUE, then the encoder will emit the output frame
-// without any lag (if supported). Note that disableLaggedOutput is only used by the first call to this function (which
-// initializes the encoder) and is ignored by the subsequent calls.
+// Similarly, avifCodecEncodeImageFunc should use the quality parameter instead of
+// encoder->quality, encoder->qualityAlpha, and encoder->qualityGainMap. If disableLaggedOutput is AVIF_TRUE, then
+// the encoder will emit the output frame without any lag (if supported). Note that disableLaggedOutput is only
+// used by the first call to this function (which initializes the encoder) and is ignored by the subsequent calls.
 //
 // Note: The caller of avifCodecEncodeImageFunc always passes encoder->data->tileRowsLog2 and
 // encoder->data->tileColsLog2 as the tileRowsLog2 and tileColsLog2 arguments. Because
@@ -588,7 +581,7 @@ typedef avifResult (*avifCodecEncodeImageFunc)(struct avifCodec * codec,
                                                avifBool alpha,
                                                int tileRowsLog2,
                                                int tileColsLog2,
-                                               int quantizer,
+                                               int quality,
                                                avifEncoderChanges encoderChanges,
                                                avifBool disableLaggedOutput,
                                                avifAddImageFlags addImageFlags,
@@ -606,10 +599,11 @@ typedef struct avifCodec
     avifDiagnostics * diag;               // Shallow copy; owned by avifEncoder or avifDecoder
 
     // Decoder options (for getNextImage):
-    int maxThreads;          // See avifDecoder::maxThreads.
-    uint32_t imageSizeLimit; // See avifDecoder::imageSizeLimit.
-    uint8_t operatingPoint;  // Operating point, defaults to 0.
-    avifBool allLayers;      // if true, the underlying codec must decode all layers, not just the best layer
+    int maxThreads;               // See avifDecoder::maxThreads.
+    uint32_t imageSizeLimit;      // See avifDecoder::imageSizeLimit.
+    uint32_t imageDimensionLimit; // See avifDecoder::imageDimensionLimit.
+    uint8_t operatingPoint;       // Operating point, defaults to 0.
+    avifBool allLayers;           // if true, the underlying codec must decode all layers, not just the best layer
 
     avifCodecGetNextImageFunc getNextImage;
     avifCodecEncodeImageFunc encodeImage;
@@ -807,6 +801,9 @@ uint8_t avifCodecConfigurationBoxGetSubsamplingType(const avifCodecConfiguration
 
 // ---------------------------------------------------------------------------
 // gain maps
+
+// Initializes avifGainMap to default values.
+void avifGainMapSetDefaults(avifGainMap * gainMap);
 
 // Finds the approximate min/max values from the given gain map values, excluding outliers.
 // Uses a histogram, with outliers defined as having at least one empty bucket between them

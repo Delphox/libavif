@@ -14,6 +14,14 @@
 #include <pthread.h>
 #endif
 
+static void * avifMemset16(void * dest, int val, size_t count)
+{
+    uint16_t * dest16 = (uint16_t *)dest;
+    for (size_t i = 0; i < count; i++)
+        *dest16++ = (uint16_t)val;
+    return dest;
+}
+
 struct YUVBlock
 {
     float y;
@@ -273,17 +281,17 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
         const uint32_t offsetBytesG = state.rgb.offsetBytesG;
         const uint32_t offsetBytesB = state.rgb.offsetBytesB;
         const uint32_t offsetBytesA = state.rgb.offsetBytesA;
-        const uint32_t rgbRowBytes = rgb->rowBytes;
+        const size_t rgbRowBytes = rgb->rowBytes;
         const float rgbMaxChannelF = state.rgb.maxChannelF;
         uint8_t * yPlane = image->yuvPlanes[AVIF_CHAN_Y];
         uint8_t * uPlane = image->yuvPlanes[AVIF_CHAN_U];
         uint8_t * vPlane = image->yuvPlanes[AVIF_CHAN_V];
-        const uint32_t yRowBytes = image->yuvRowBytes[AVIF_CHAN_Y];
-        const uint32_t uRowBytes = image->yuvRowBytes[AVIF_CHAN_U];
-        const uint32_t vRowBytes = image->yuvRowBytes[AVIF_CHAN_V];
+        const size_t yRowBytes = image->yuvRowBytes[AVIF_CHAN_Y];
+        const size_t uRowBytes = image->yuvRowBytes[AVIF_CHAN_U];
+        const size_t vRowBytes = image->yuvRowBytes[AVIF_CHAN_V];
         for (uint32_t outerJ = 0; outerJ < image->height; outerJ += 2) {
             for (uint32_t outerI = 0; outerI < image->width; outerI += 2) {
-                int blockW = 2, blockH = 2;
+                uint32_t blockW = 2, blockH = 2;
                 if ((outerI + 1) >= image->width) {
                     blockW = 1;
                 }
@@ -292,10 +300,10 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
                 }
 
                 // Convert an entire 2x2 block to YUV, and populate any fully sampled channels as we go
-                for (int bJ = 0; bJ < blockH; ++bJ) {
-                    for (int bI = 0; bI < blockW; ++bI) {
-                        int i = outerI + bI;
-                        int j = outerJ + bJ;
+                for (uint32_t bJ = 0; bJ < blockH; ++bJ) {
+                    for (uint32_t bI = 0; bI < blockW; ++bI) {
+                        const uint32_t i = outerI + bI;
+                        const uint32_t j = outerJ + bJ;
 
                         // Unpack RGB into normalized float
                         if (state.rgb.channelBytes > 1) {
@@ -404,8 +412,8 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
 
                     float sumU = 0.0f;
                     float sumV = 0.0f;
-                    for (int bJ = 0; bJ < blockH; ++bJ) {
-                        for (int bI = 0; bI < blockW; ++bI) {
+                    for (uint32_t bJ = 0; bJ < blockH; ++bJ) {
+                        for (uint32_t bI = 0; bI < blockW; ++bI) {
                             sumU += yuvBlock[bI][bJ].u;
                             sumV += yuvBlock[bI][bJ].v;
                         }
@@ -430,10 +438,10 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
                 } else if (image->yuvFormat == AVIF_PIXEL_FORMAT_YUV422) {
                     // YUV422, average 2 samples (1x2), twice
 
-                    for (int bJ = 0; bJ < blockH; ++bJ) {
+                    for (uint32_t bJ = 0; bJ < blockH; ++bJ) {
                         float sumU = 0.0f;
                         float sumV = 0.0f;
-                        for (int bI = 0; bI < blockW; ++bI) {
+                        for (uint32_t bI = 0; bI < blockW; ++bI) {
                             sumU += yuvBlock[bI][bJ].u;
                             sumV += yuvBlock[bI][bJ].v;
                         }
@@ -469,9 +477,9 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
             for (uint32_t i = 0; i < image->width; ++i) {
                 float g;
                 if (state.rgb.channelBytes > 1) {
-                    g = *(uint16_t *)&rgb->pixels[offsetBytesGray + i * grayPixelBytes + (j * grayRowBytes)];
+                    g = *(uint16_t *)&rgb->pixels[offsetBytesGray + i * grayPixelBytes + (j * grayRowBytes)] / grayMaxChannelF;
                 } else {
-                    g = rgb->pixels[offsetBytesGray + i * grayPixelBytes + (j * grayRowBytes)];
+                    g = rgb->pixels[offsetBytesGray + i * grayPixelBytes + (j * grayRowBytes)] / grayMaxChannelF;
                 }
                 if (alphaMode != AVIF_ALPHA_MULTIPLY_MODE_NO_OP) {
                     float a;
@@ -497,26 +505,37 @@ avifResult avifImageRGBToYUV(avifImage * image, const avifRGBImage * rgb)
                         }
                     }
                 }
-                g = avifRoundf(AVIF_CLAMP(g, 0.0f, state.yuv.maxChannel));
+                int gInt = avifYUVColorSpaceInfoYToUNorm(&state.yuv, g);
                 if (state.yuv.channelBytes > 1) {
                     uint16_t * pY = (uint16_t *)&yPlane[(i * 2) + j * yRowBytes];
-                    *pY = (uint16_t)g;
+                    *pY = (uint16_t)gInt;
                 } else {
-                    yPlane[i + (j * yRowBytes)] = (uint8_t)g;
+                    yPlane[i + (j * yRowBytes)] = (uint8_t)gInt;
                 }
             }
         }
-        // Set the chroma planes to 128 if any.
+        // Set the chroma planes, if any, to the half value.
         avifPixelFormatInfo info;
         avifGetPixelFormatInfo(image->yuvFormat, &info);
         const uint32_t shiftedH = (uint32_t)(((uint64_t)image->height + info.chromaShiftY) >> info.chromaShiftY);
+        const int half = 1 << (image->depth - 1);
         if (image->yuvPlanes[AVIF_CHAN_U]) {
+            uint8_t * uPlane = image->yuvPlanes[AVIF_CHAN_U];
             const uint32_t uRowBytes = image->yuvRowBytes[AVIF_CHAN_U];
-            memset(image->yuvPlanes[AVIF_CHAN_U], 128, shiftedH * uRowBytes);
+            if (state.yuv.channelBytes > 1) {
+                avifMemset16(uPlane, half, shiftedH * uRowBytes / 2);
+            } else {
+                memset(uPlane, half, shiftedH * uRowBytes);
+            }
         }
         if (image->yuvPlanes[AVIF_CHAN_V]) {
+            uint8_t * vPlane = image->yuvPlanes[AVIF_CHAN_V];
             const uint32_t vRowBytes = image->yuvRowBytes[AVIF_CHAN_V];
-            memset(image->yuvPlanes[AVIF_CHAN_V], 128, shiftedH * vRowBytes);
+            if (state.yuv.channelBytes > 1) {
+                avifMemset16(vPlane, half, shiftedH * vRowBytes / 2);
+            } else {
+                memset(vPlane, half, shiftedH * vRowBytes);
+            }
         }
     }
 

@@ -3,13 +3,32 @@
 
 #include "avifutil.h"
 
+#include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "avifjpeg.h"
 #include "avifpng.h"
 #include "y4m.h"
+
+char * avifFileFormatToString(avifAppFileFormat format)
+{
+    switch (format) {
+        case AVIF_APP_FILE_FORMAT_UNKNOWN:
+            return "unknown";
+        case AVIF_APP_FILE_FORMAT_AVIF:
+            return "AVIF";
+        case AVIF_APP_FILE_FORMAT_JPEG:
+            return "JPEG";
+        case AVIF_APP_FILE_FORMAT_PNG:
+            return "PNG";
+        case AVIF_APP_FILE_FORMAT_Y4M:
+            return "Y4M";
+    }
+    return "unknown";
+}
 
 // |a| and |b| hold int32_t values. The int64_t type is used so that we can negate INT32_MIN without
 // overflowing int32_t.
@@ -128,14 +147,20 @@ static void avifImageDumpInternal(const avifImage * avif, uint32_t gridCols, uin
     printf(" * Gain map       : ");
     avifImage * gainMapImage = avif->gainMap ? avif->gainMap->image : NULL;
     if (gainMapImage != NULL) {
-        printf("%ux%u pixels, %u bit, %s, %s Range, Matrix Coeffs. %u, Base Image is %s\n",
+        printf("%ux%u pixels, %u bit, %s, %s Range, Matrix Coeffs. %u, Base Headroom %.2f (%s), Alternate Headroom %.2f (%s)\n",
                gainMapImage->width,
                gainMapImage->height,
                gainMapImage->depth,
                avifPixelFormatToString(gainMapImage->yuvFormat),
                (gainMapImage->yuvRange == AVIF_RANGE_FULL) ? "Full" : "Limited",
                gainMapImage->matrixCoefficients,
-               (avif->gainMap->baseHdrHeadroom.n == 0) ? "SDR" : "HDR");
+               avif->gainMap->baseHdrHeadroom.d == 0 ? 0
+                                                     : (double)avif->gainMap->baseHdrHeadroom.n / avif->gainMap->baseHdrHeadroom.d,
+               (avif->gainMap->baseHdrHeadroom.n == 0) ? "SDR" : "HDR",
+               avif->gainMap->alternateHdrHeadroom.d == 0
+                   ? 0
+                   : (double)avif->gainMap->alternateHdrHeadroom.n / avif->gainMap->alternateHdrHeadroom.d,
+               (avif->gainMap->alternateHdrHeadroom.n == 0) ? "SDR" : "HDR");
         printf(" * Alternate image:\n");
         printf("    * Color Primaries: %u\n", avif->gainMap->altColorPrimaries);
         printf("    * Transfer Char. : %u\n", avif->gainMap->altTransferCharacteristics);
@@ -151,8 +176,8 @@ static void avifImageDumpInternal(const avifImage * avif, uint32_t gridCols, uin
         if (avif->gainMap->altPlaneCount) {
             printf("    * Planes         : %u\n", avif->gainMap->altPlaneCount);
         }
-        if (gainMapImage->clli.maxCLL > 0 || gainMapImage->clli.maxPALL > 0) {
-            printf("    * CLLI           : %hu, %hu\n", gainMapImage->clli.maxCLL, gainMapImage->clli.maxPALL);
+        if (avif->gainMap->altCLLI.maxCLL > 0 || avif->gainMap->altCLLI.maxPALL > 0) {
+            printf("    * CLLI           : %hu, %hu\n", avif->gainMap->altCLLI.maxCLL, avif->gainMap->altCLLI.maxPALL);
         }
         printf("\n");
     } else if (avif->gainMap != NULL) {
@@ -285,13 +310,13 @@ avifAppFileFormat avifGuessBufferFileFormat(const uint8_t * data, size_t size)
 }
 
 avifAppFileFormat avifReadImage(const char * filename,
+                                avifAppFileFormat inputFormat,
                                 avifPixelFormat requestedFormat,
                                 int requestedDepth,
                                 avifChromaDownsampling chromaDownsampling,
                                 avifBool ignoreColorProfile,
                                 avifBool ignoreExif,
                                 avifBool ignoreXMP,
-                                avifBool allowChangingCicp,
                                 avifBool ignoreGainMap,
                                 uint32_t imageSizeLimit,
                                 avifImage * image,
@@ -299,15 +324,18 @@ avifAppFileFormat avifReadImage(const char * filename,
                                 avifAppSourceTiming * sourceTiming,
                                 struct y4mFrameIterator ** frameIter)
 {
-    const avifAppFileFormat format = avifGuessFileFormat(filename);
-    if (format == AVIF_APP_FILE_FORMAT_Y4M) {
+    if (inputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
+        inputFormat = avifGuessFileFormat(filename);
+    }
+
+    if (inputFormat == AVIF_APP_FILE_FORMAT_Y4M) {
         if (!y4mRead(filename, imageSizeLimit, image, sourceTiming, frameIter)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
         if (outDepth) {
             *outDepth = image->depth;
         }
-    } else if (format == AVIF_APP_FILE_FORMAT_JPEG) {
+    } else if (inputFormat == AVIF_APP_FILE_FORMAT_JPEG) {
         // imageSizeLimit is also used to limit Exif and XMP metadata here.
         if (!avifJPEGRead(filename, image, requestedFormat, requestedDepth, chromaDownsampling, ignoreColorProfile, ignoreExif, ignoreXMP, ignoreGainMap, imageSizeLimit)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
@@ -315,25 +343,18 @@ avifAppFileFormat avifReadImage(const char * filename,
         if (outDepth) {
             *outDepth = 8;
         }
-    } else if (format == AVIF_APP_FILE_FORMAT_PNG) {
-        if (!avifPNGRead(filename,
-                         image,
-                         requestedFormat,
-                         requestedDepth,
-                         chromaDownsampling,
-                         ignoreColorProfile,
-                         ignoreExif,
-                         ignoreXMP,
-                         allowChangingCicp,
-                         imageSizeLimit,
-                         outDepth)) {
+    } else if (inputFormat == AVIF_APP_FILE_FORMAT_PNG) {
+        if (!avifPNGRead(filename, image, requestedFormat, requestedDepth, chromaDownsampling, ignoreColorProfile, ignoreExif, ignoreXMP, imageSizeLimit, outDepth)) {
             return AVIF_APP_FILE_FORMAT_UNKNOWN;
         }
-    } else {
+    } else if (inputFormat == AVIF_APP_FILE_FORMAT_UNKNOWN) {
         fprintf(stderr, "Unrecognized file format for input file: %s\n", filename);
         return AVIF_APP_FILE_FORMAT_UNKNOWN;
+    } else {
+        fprintf(stderr, "Unsupported file format %s for input file: %s\n", avifFileFormatToString(inputFormat), filename);
+        return AVIF_APP_FILE_FORMAT_UNKNOWN;
     }
-    return format;
+    return inputFormat;
 }
 
 avifBool avifReadEntireFile(const char * filename, avifRWData * raw)
@@ -460,3 +481,171 @@ int avifQueryCPUCount(void)
 }
 
 #endif
+
+// Returns the best cell size for a given horizontal or vertical dimension.
+avifBool avifGetBestCellSize(const char * dimensionStr, uint32_t numPixels, uint32_t numCells, avifBool isSubsampled, uint32_t * cellSize)
+{
+    assert(numPixels);
+    assert(numCells);
+
+    // ISO/IEC 23008-12:2017, Section 6.6.2.3.1:
+    //   The reconstructed image is formed by tiling the input images into a grid with a column width
+    //   (potentially excluding the right-most column) equal to tile_width and a row height (potentially
+    //   excluding the bottom-most row) equal to tile_height, without gap or overlap, and then
+    //   trimming on the right and the bottom to the indicated output_width and output_height.
+    // The priority could be to use a cell size that is a multiple of 64, but there is not always a valid one,
+    // even though it is recommended by MIAF. Just use ceil(numPixels/numCells) for simplicity and to avoid
+    // as much padding in the right-most and bottom-most cells as possible.
+    // Use uint64_t computation to avoid a potential uint32_t overflow.
+    *cellSize = (uint32_t)(((uint64_t)numPixels + numCells - 1) / numCells);
+
+    // ISO/IEC 23000-22:2019, Section 7.3.11.4.2:
+    //   - the tile_width shall be greater than or equal to 64, and should be a multiple of 64
+    //   - the tile_height shall be greater than or equal to 64, and should be a multiple of 64
+    if (*cellSize < 64) {
+        *cellSize = 64;
+        if ((uint64_t)(numCells - 1) * *cellSize >= (uint64_t)numPixels) {
+            // Some cells would be entirely off-canvas.
+            fprintf(stderr, "ERROR: There are too many cells %s (%u) to have at least 64 pixels per cell.\n", dimensionStr, numCells);
+            return AVIF_FALSE;
+        }
+    }
+
+    // The maximum AV1 frame size is 65536 pixels inclusive.
+    if (*cellSize > 65536) {
+        fprintf(stderr, "ERROR: Cell size %u is bigger %s than the maximum frame size 65536.\n", *cellSize, dimensionStr);
+        return AVIF_FALSE;
+    }
+
+    // ISO/IEC 23000-22:2019, Section 7.3.11.4.2:
+    //   - when the images are in the 4:2:2 chroma sampling format the horizontal tile offsets and widths,
+    //     and the output width, shall be even numbers;
+    //   - when the images are in the 4:2:0 chroma sampling format both the horizontal and vertical tile
+    //     offsets and widths, and the output width and height, shall be even numbers.
+    if (isSubsampled && (*cellSize & 1)) {
+        ++*cellSize;
+        if ((uint64_t)(numCells - 1) * *cellSize >= (uint64_t)numPixels) {
+            // Some cells would be entirely off-canvas.
+            fprintf(stderr, "ERROR: Odd cell size %u is forbidden on a %s subsampled image.\n", *cellSize - 1, dimensionStr);
+            return AVIF_FALSE;
+        }
+    }
+
+    // Each pixel is covered by exactly one cell, and each cell contains at least one pixel.
+    assert(((uint64_t)(numCells - 1) * *cellSize < (uint64_t)numPixels) && ((uint64_t)numCells * *cellSize >= (uint64_t)numPixels));
+    return AVIF_TRUE;
+}
+
+avifBool avifImageSplitGrid(const avifImage * gridSplitImage, uint32_t gridCols, uint32_t gridRows, avifImage ** gridCells)
+{
+    uint32_t cellWidth, cellHeight;
+    avifPixelFormatInfo formatInfo;
+    avifGetPixelFormatInfo(gridSplitImage->yuvFormat, &formatInfo);
+    const avifBool isSubsampledX = !formatInfo.monochrome && formatInfo.chromaShiftX;
+    const avifBool isSubsampledY = !formatInfo.monochrome && formatInfo.chromaShiftY;
+    if (!avifGetBestCellSize("horizontally", gridSplitImage->width, gridCols, isSubsampledX, &cellWidth) ||
+        !avifGetBestCellSize("vertically", gridSplitImage->height, gridRows, isSubsampledY, &cellHeight)) {
+        return AVIF_FALSE;
+    }
+    const avifBool hasGainMap = gridSplitImage->gainMap && gridSplitImage->gainMap->image;
+
+    for (uint32_t gridY = 0; gridY < gridRows; ++gridY) {
+        for (uint32_t gridX = 0; gridX < gridCols; ++gridX) {
+            uint32_t gridIndex = gridX + (gridY * gridCols);
+            avifImage * cellImage = avifImageCreateEmpty();
+            if (!cellImage) {
+                fprintf(stderr, "ERROR: Cell creation failed: out of memory\n");
+                return AVIF_FALSE;
+            }
+            gridCells[gridIndex] = cellImage;
+
+            avifCropRect cellRect = { gridX * cellWidth, gridY * cellHeight, cellWidth, cellHeight };
+            if (cellRect.x + cellRect.width > gridSplitImage->width) {
+                cellRect.width = gridSplitImage->width - cellRect.x;
+            }
+            if (cellRect.y + cellRect.height > gridSplitImage->height) {
+                cellRect.height = gridSplitImage->height - cellRect.y;
+            }
+            const avifResult copyResult = avifImageSetViewRect(cellImage, gridSplitImage, &cellRect);
+            if (copyResult != AVIF_RESULT_OK) {
+                fprintf(stderr, "ERROR: Cell creation failed: %s\n", avifResultToString(copyResult));
+                return AVIF_FALSE;
+            }
+
+            if (hasGainMap) {
+                cellImage->gainMap = avifGainMapCreate();
+                if (!cellImage->gainMap) {
+                    fprintf(stderr, "ERROR: Gain map creation failed: out of memory\n");
+                    return AVIF_FALSE;
+                }
+                // Copy gain map metadata.
+                memcpy(cellImage->gainMap, gridSplitImage->gainMap, sizeof(avifGainMap));
+                cellImage->gainMap->altICC.data = NULL; // Copied later in this function.
+                cellImage->gainMap->altICC.size = 0;
+                cellImage->gainMap->image = NULL; // Set later in this function.
+            }
+        }
+    }
+
+    if (hasGainMap) {
+        avifImage ** gainMapGridCells = NULL;
+        gainMapGridCells = (avifImage **)calloc(gridCols * gridRows, sizeof(avifImage *));
+        if (!gainMapGridCells) {
+            fprintf(stderr, "ERROR: Memory allocation failed for gain map grid cells\n");
+            return AVIF_FALSE;
+        }
+        if (!avifImageSplitGrid(gridSplitImage->gainMap->image, gridCols, gridRows, gainMapGridCells)) {
+            for (uint32_t i = 0; i < gridCols * gridRows; ++i) {
+                if (gainMapGridCells[i]) {
+                    avifImageDestroy(gainMapGridCells[i]);
+                }
+            }
+            free(gainMapGridCells);
+            return AVIF_FALSE;
+        }
+
+        for (uint32_t gridIndex = 0; gridIndex < gridCols * gridRows; ++gridIndex) {
+            // Ownership of the gain map cell is transferred.
+            gridCells[gridIndex]->gainMap->image = gainMapGridCells[gridIndex];
+        }
+        free(gainMapGridCells);
+    }
+
+    // Copy over metadata blobs to the first cell since avifImageSetViewRect() does not copy any
+    // properties that require an allocation.
+    avifImage * firstCell = gridCells[0];
+    if (gridSplitImage->icc.size > 0) {
+        const avifResult result = avifImageSetProfileICC(firstCell, gridSplitImage->icc.data, gridSplitImage->icc.size);
+        if (result != AVIF_RESULT_OK) {
+            fprintf(stderr, "ERROR: Failed to set ICC profile on grid cell: %s\n", avifResultToString(result));
+            return AVIF_FALSE;
+        }
+    }
+    if (gridSplitImage->exif.size > 0) {
+        const avifResult result = avifImageSetMetadataExif(firstCell, gridSplitImage->exif.data, gridSplitImage->exif.size);
+        if (result != AVIF_RESULT_OK) {
+            fprintf(stderr, "ERROR: Failed to set Exif metadata on grid cell: %s\n", avifResultToString(result));
+            return AVIF_FALSE;
+        }
+    }
+    if (gridSplitImage->xmp.size > 0) {
+        const avifResult result = avifImageSetMetadataXMP(firstCell, gridSplitImage->xmp.data, gridSplitImage->xmp.size);
+        if (result != AVIF_RESULT_OK) {
+            fprintf(stderr, "ERROR: Failed to set XMP metadata on grid cell: %s\n", avifResultToString(result));
+            return AVIF_FALSE;
+        }
+    }
+    if (gridSplitImage->gainMap && gridSplitImage->gainMap->image && gridSplitImage->gainMap->altICC.size > 0) {
+        for (uint32_t i = 0; i < gridCols * gridRows; ++i) {
+            avifImage * cellImage = gridCells[i];
+            const avifResult result =
+                avifRWDataSet(&cellImage->gainMap->altICC, gridSplitImage->gainMap->altICC.data, gridSplitImage->gainMap->altICC.size);
+            if (result != AVIF_RESULT_OK) {
+                fprintf(stderr, "ERROR: Failed to set ICC profile on gain map grid cell: %s\n", avifResultToString(result));
+                return AVIF_FALSE;
+            }
+        }
+    }
+
+    return AVIF_TRUE;
+}

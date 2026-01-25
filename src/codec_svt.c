@@ -44,13 +44,20 @@ typedef struct avifCodecInternal
 static avifBool allocate_svt_buffers(EbBufferHeaderType ** input_buf);
 static avifResult dequeue_frame(avifCodec * codec, avifCodecEncodeOutput * output, avifBool done_sending_pics);
 
+static int svtQualityToQuantizer(int quality)
+{
+    const int quantizer = ((100 - quality) * 63 + 50) / 100;
+
+    return quantizer;
+}
+
 static avifResult svtCodecEncodeImage(avifCodec * codec,
                                       avifEncoder * encoder,
                                       const avifImage * image,
                                       avifBool alpha,
                                       int tileRowsLog2,
                                       int tileColsLog2,
-                                      int quantizer,
+                                      int quality,
                                       avifEncoderChanges encoderChanges,
                                       avifBool disableLaggedOutput,
                                       uint32_t addImageFlags,
@@ -142,14 +149,15 @@ static avifResult svtCodecEncodeImage(avifCodec * codec,
         svt_config->encoder_color_format = color_format;
         svt_config->encoder_bit_depth = (uint8_t)image->depth;
 
-        // Section 2.3.4 of AV1-ISOBMFF says 'colr' with 'nclx' should be present and shall match CICP
-        // values in the Sequence Header OBU, unless the latter has 2/2/2 (Unspecified).
-        // So set CICP values to 2/2/2 (Unspecified) in the Sequence Header OBU for simplicity.
-        // It may also save 3 bytes since the AV1 encoder may set color_description_present_flag to 0
-        // (see Section 5.5.2 "Color config syntax" of the AV1 specification).
-        svt_config->color_primaries = EB_CICP_CP_UNSPECIFIED;
-        svt_config->transfer_characteristics = EB_CICP_TC_UNSPECIFIED;
-        svt_config->matrix_coefficients = EB_CICP_MC_UNSPECIFIED;
+        // AVIF specification, Section 2.2.1. "AV1 Item Configuration Property":
+        //   The values of the fields in the AV1CodecConfigurationBox shall match those
+        //   of the Sequence Header OBU in the AV1 Image Item Data.
+        // CICP values could be set to 2/2/2 (Unspecified) in the Sequence Header OBU for
+        // simplicity and to save 3 bytes, but some decoders ignore the colr box and rely
+        // on the OBU contents instead. See #2850.
+        svt_config->color_primaries = (EbColorPrimaries)image->colorPrimaries;
+        svt_config->transfer_characteristics = (EbTransferCharacteristics)image->transferCharacteristics;
+        svt_config->matrix_coefficients = (EbMatrixCoefficients)image->matrixCoefficients;
 
         svt_config->color_range = svt_range;
 #if !SVT_AV1_CHECK_VERSION(0, 9, 0)
@@ -173,13 +181,13 @@ static avifResult svtCodecEncodeImage(avifCodec * codec,
 
         svt_config->rate_control_mode = 0; // CRF because enable_adaptive_quantization is 2
         if (alpha) {
-            svt_config->min_qp_allowed = AVIF_CLAMP(encoder->minQuantizerAlpha, 0, 63);
+            svt_config->min_qp_allowed = AVIF_CLAMP(encoder->minQuantizerAlpha, 0, 62);
             svt_config->max_qp_allowed = AVIF_CLAMP(encoder->maxQuantizerAlpha, 0, 63);
         } else {
-            svt_config->min_qp_allowed = AVIF_CLAMP(encoder->minQuantizer, 0, 63);
+            svt_config->min_qp_allowed = AVIF_CLAMP(encoder->minQuantizer, 0, 62);
             svt_config->max_qp_allowed = AVIF_CLAMP(encoder->maxQuantizer, 0, 63);
         }
-        svt_config->qp = quantizer;
+        svt_config->qp = svtQualityToQuantizer(quality);
 
         if (tileRowsLog2 != 0) {
             svt_config->tile_rows = tileRowsLog2;
@@ -232,7 +240,7 @@ static avifResult svtCodecEncodeImage(avifCodec * codec,
 #endif
 
 #if SVT_AV1_CHECK_VERSION(3, 0, 0)
-        svt_config->lossless = quantizer == AVIF_QUANTIZER_LOSSLESS;
+        svt_config->lossless = quality == AVIF_QUALITY_LOSSLESS;
         // TODO: https://gitlab.com/AOMediaCodec/SVT-AV1/-/issues/2245 - Enable when resolved.
         // svt_config->avif = (addImageFlags & AVIF_ADD_IMAGE_FLAG_SINGLE) != 0;
 #endif
