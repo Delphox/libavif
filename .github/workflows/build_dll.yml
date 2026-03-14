@@ -2,10 +2,10 @@ name: Build libavif DLL (Windows)
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ avif-dll ]
   pull_request:
-    branches: [ main, master ]
-
+    branches: [ avif-dll ]
+  workflow_dispatch:  
 jobs:
   build-windows-dll:
     runs-on: windows-latest
