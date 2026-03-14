@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TWO_LAYER_ALL_INTRA_QUALITY_THRESHOLD 10
+
 struct avifCodecInternal
 {
     avifBool decoderInitialized;
@@ -339,7 +341,7 @@ static avifBool avifKeyEqualsName(const char * key, const char * name, avifBool 
 static avifBool avifProcessAVMOptionsPreInit(avifCodec * codec, avifBool alpha, struct avm_codec_enc_cfg * cfg)
 {
     for (uint32_t i = 0; i < codec->csOptions->count; ++i) {
-        avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
+        const avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
         int val;
         if (avifKeyEqualsName(entry->key, "end-usage", alpha)) { // Rate control mode
             if (!avmOptionParseEnum(entry->value, endUsageEnum, &val)) {
@@ -355,7 +357,7 @@ static avifBool avifProcessAVMOptionsPreInit(avifCodec * codec, avifBool alpha, 
 static avifBool avifProcessAVMOptionsPostInit(avifCodec * codec, avifBool alpha)
 {
     for (uint32_t i = 0; i < codec->csOptions->count; ++i) {
-        avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
+        const avifCodecSpecificOption * entry = &codec->csOptions->entries[i];
         // Skip options for the other kind of plane.
         const char * otherPrefix = alpha ? "color:" : "alpha:";
         size_t otherPrefixLen = 6;
@@ -507,6 +509,35 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
         // Profile 2.  8-bit and 10-bit 4:2:2
         //            12-bit 4:0:0, 4:2:0, 4:2:2 and 4:4:4
         uint8_t seqProfile = 0;
+#if defined(CONFIG_AV2_PROFILES) && CONFIG_AV2_PROFILES
+        if (image->depth != 8 && image->depth != 10) {
+            avifDiagnosticsPrintf(codec->diag, "%d-bit is not supported in AV2 encoder.", image->depth);
+            return AVIF_RESULT_INVALID_ARGUMENT;
+        }
+        // Based on https://gitlab.com/AOMediaCodec/avm/-/blob/main/av2/common/enums.h?ref_type=fcab0163f471b38fe593672fcbd24a6beb0be82e#L272
+        if (alpha) {
+            seqProfile = 3; // Main_420_10
+        } else {
+            switch (image->yuvFormat) {
+                case AVIF_PIXEL_FORMAT_YUV444:
+                    seqProfile = 5; // Main_444_10
+                    break;
+                case AVIF_PIXEL_FORMAT_YUV422:
+                    seqProfile = 4; // Main_422_10
+                    break;
+                case AVIF_PIXEL_FORMAT_YUV420:
+                    seqProfile = 3; // Main_420_10
+                    break;
+                case AVIF_PIXEL_FORMAT_YUV400:
+                    seqProfile = 3; // Main_420_10
+                    break;
+                case AVIF_PIXEL_FORMAT_NONE:
+                case AVIF_PIXEL_FORMAT_COUNT:
+                default:
+                    break;
+            }
+        }
+#else
         if (image->depth == 12) {
             // Only seqProfile 2 can handle 12 bit
             seqProfile = 2;
@@ -536,6 +567,7 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
                 }
             }
         }
+#endif
 
         cfg->g_profile = seqProfile;
         cfg->g_bit_depth = image->depth;
@@ -547,9 +579,22 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
             // libavm to set still_picture and reduced_still_picture_header to
             // 1 in AV2 sequence headers.
             cfg->g_limit = 1;
+        }
 
-            // Use the default settings of the new AVM_USAGE_ALL_INTRA (added in
-            // https://crbug.com/aomedia/2959).
+        // Determine whether the encoder should be configured to use intra frames only, by manually configuring the encoder so all
+        // frames will be key frames.
+
+        // All-intra encoding is beneficial when encoding a two-layer image item and the quality of the first layer is very low.
+        // Switching to all-intra encoding comes with the following benefits:
+        // - The first layer will be smaller than the second layer (which is often not the case with inter encoding)
+        // - Outputs have predictable file sizes: the sum of the first layer (quality <= 10) plus the second layer (quality set by the caller)
+        // - Because the first layer is very small, layered encoding overhead is also smaller and more stable (about 5-8% for quality 40 and 2-4% for quality 60)
+        avifBool useAllIntraForLayered = encoder->extraLayerCount == 1 && quality <= TWO_LAYER_ALL_INTRA_QUALITY_THRESHOLD;
+        avifBool useAllIntra = (addImageFlags & AVIF_ADD_IMAGE_FLAG_SINGLE) || useAllIntraForLayered;
+
+        if (useAllIntra) {
+            // Use the default settings of libaom's AOM_USAGE_ALL_INTRA (added
+            // in https://crbug.com/aomedia/2959).
             //
             // Set g_lag_in_frames to 0 to reduce the number of frame buffers
             // (from 20 to 2) in libavm's lookahead structure. This reduces
@@ -858,8 +903,8 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
         if (avmImageAllocated) {
             const uint32_t bytesPerRow = ((image->depth > 8) ? 2 : 1) * image->width;
             for (uint32_t j = 0; j < image->height; ++j) {
-                const uint8_t * srcAlphaRow = &image->alphaPlane[j * image->alphaRowBytes];
-                uint8_t * dstAlphaRow = &avmImage.planes[0][j * avmImage.stride[0]];
+                const uint8_t * srcAlphaRow = &image->alphaPlane[(size_t)j * image->alphaRowBytes];
+                uint8_t * dstAlphaRow = &avmImage.planes[0][(size_t)j * avmImage.stride[0]];
                 memcpy(dstAlphaRow, srcAlphaRow, bytesPerRow);
             }
         } else {
@@ -882,8 +927,8 @@ static avifResult avmCodecEncodeImage(avifCodec * codec,
                 uint32_t bytesPerRow = bytesPerPixel * planeWidth;
 
                 for (uint32_t j = 0; j < planeHeight; ++j) {
-                    const uint8_t * srcRow = &image->yuvPlanes[yuvPlane][j * image->yuvRowBytes[yuvPlane]];
-                    uint8_t * dstRow = &avmImage.planes[yuvPlane][j * avmImage.stride[yuvPlane]];
+                    const uint8_t * srcRow = &image->yuvPlanes[yuvPlane][(size_t)j * image->yuvRowBytes[yuvPlane]];
+                    uint8_t * dstRow = &avmImage.planes[yuvPlane][(size_t)j * avmImage.stride[yuvPlane]];
                     memcpy(dstRow, srcRow, bytesPerRow);
                 }
             }

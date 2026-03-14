@@ -1381,7 +1381,6 @@ static avifBool avifJPEGReadInternal(FILE * f,
             if ((marker->marker == (JPEG_APP0 + 1)) && (marker->data_length > AVIF_JPEG_EXIF_HEADER_LENGTH) &&
                 !memcmp(marker->data, AVIF_JPEG_EXIF_HEADER, AVIF_JPEG_EXIF_HEADER_LENGTH)) {
                 if (found) {
-                    // TODO(yguyon): Implement instead of outputting an error.
                     fprintf(stderr, "Exif extraction failed: unsupported Exif split into multiple segments or invalid multiple Exif segments\n");
                     goto cleanup;
                 }
@@ -1395,15 +1394,22 @@ static avifBool avifJPEGReadInternal(FILE * f,
                     goto cleanup;
                 }
 
-                // Exif orientation, if any, is imported to avif->irot/imir and kept in avif->exif.
-                // libheif has the same behavior, see
-                // https://github.com/strukturag/libheif/blob/ea78603d8e47096606813d221725621306789ff2/examples/heif_enc.cc#L403
+                // Exif orientation, if any, is imported to avif->irot/imir, and the Exif data is saved to avif->exif.
                 if (avifImageSetMetadataExif(avif,
                                              marker->data + AVIF_JPEG_EXIF_HEADER_LENGTH,
                                              marker->data_length - AVIF_JPEG_EXIF_HEADER_LENGTH) != AVIF_RESULT_OK) {
                     fprintf(stderr, "Setting Exif metadata failed: %s (out of memory)\n", inputFilename);
                     goto cleanup;
                 }
+                // Set the Exif orientation to 1 (no transformation).
+                // ISO/IEC 23000-22:2024 (MIAF), Section 7.3.10.1:
+                //   There should be no image transformations expressed by Exif (rotation,
+                //   mirroring, etc.) indicated in the Exif metadata, in files encoded according
+                //   to this document.
+                // Do not check for errors, it's a "should" so ok to do on a best-effort basis.
+                // Moreover it should only fail if the Exif is marlformed or there is no orientation
+                // tag to begin with.
+                (void)avifSetExifOrientation(&avif->exif, 1);
                 found = AVIF_TRUE;
             }
         }
@@ -1665,18 +1671,30 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     cinfo.err = jpeg_std_error(&jerr);
     jpeg_create_compress(&cinfo);
 
-    avifRGBImage rgb;
-    avifRGBImageSetDefaults(&rgb, avif);
-    rgb.format = avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV400 ? AVIF_RGB_FORMAT_GRAY : AVIF_RGB_FORMAT_RGB;
-    rgb.chromaUpsampling = chromaUpsampling;
-    rgb.depth = 8;
-    if (avifRGBImageAllocatePixels(&rgb) != AVIF_RESULT_OK) {
+    avifRGBImage rgbData;
+    avifRGBImageSetDefaults(&rgbData, avif);
+    rgbData.format = avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV400 ? AVIF_RGB_FORMAT_GRAY : AVIF_RGB_FORMAT_RGB;
+    rgbData.chromaUpsampling = chromaUpsampling;
+    rgbData.depth = 8;
+    if (avifRGBImageAllocatePixels(&rgbData) != AVIF_RESULT_OK) {
         fprintf(stderr, "Conversion to RGB failed: %s (out of memory)\n", outputFilename);
         goto cleanup;
     }
-    if (avifImageYUVToRGB(avif, &rgb) != AVIF_RESULT_OK) {
+    if (avifImageYUVToRGB(avif, &rgbData) != AVIF_RESULT_OK) {
         fprintf(stderr, "Conversion to RGB failed: %s\n", outputFilename);
         goto cleanup;
+    }
+
+    // rgbView is a view on rgbData. avifApplyTransforms() may modify rgbData.
+    avifRGBImage rgbView;
+    avifResult transformResult = avifApplyTransforms(&rgbView, &rgbData, avif);
+    if (transformResult != AVIF_RESULT_OK) {
+        if (transformResult == AVIF_RESULT_INVALID_ARGUMENT) {
+            fprintf(stderr, "Warning, ignoring invalid transforms (clap/irot/imir)\n");
+        } else {
+            fprintf(stderr, "Failed to apply transforms: %s\n", avifResultToString(transformResult));
+            goto cleanup;
+        }
     }
 
     f = fopen(outputFilename, "wb");
@@ -1686,8 +1704,8 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     }
 
     jpeg_stdio_dest(&cinfo, f);
-    cinfo.image_width = avif->width;
-    cinfo.image_height = avif->height;
+    cinfo.image_width = rgbView.width;
+    cinfo.image_height = rgbView.height;
     const avifBool isGray = avif->yuvFormat == AVIF_PIXEL_FORMAT_YUV400;
     cinfo.input_components = isGray ? 1 : 3;
     cinfo.in_color_space = isGray ? JCS_GRAYSCALE : JCS_RGB;
@@ -1696,23 +1714,8 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     jpeg_start_compress(&cinfo, TRUE);
 
     if (avif->icc.data && (avif->icc.size > 0)) {
-        // TODO(yguyon): Use jpeg_write_icc_profile() instead?
+        // Note: jpeg_write_icc_profile() could be used instead.
         write_icc_profile(&cinfo, avif->icc.data, (unsigned int)avif->icc.size);
-    }
-
-    if (avif->transformFlags & AVIF_TRANSFORM_CLAP) {
-        avifCropRect cropRect;
-        avifDiagnostics diag;
-        if (avifCropRectFromCleanApertureBox(&cropRect, &avif->clap, avif->width, avif->height, &diag) &&
-            (cropRect.x != 0 || cropRect.y != 0 || cropRect.width != avif->width || cropRect.height != avif->height)) {
-            // TODO: https://github.com/AOMediaCodec/libavif/issues/2427 - Implement.
-            fprintf(stderr,
-                    "Warning: Clean Aperture values were ignored, the output image was NOT cropped to rectangle {%u,%u,%u,%u}\n",
-                    cropRect.x,
-                    cropRect.y,
-                    cropRect.width,
-                    cropRect.height);
-        }
     }
 
     if (avif->exif.data && (avif->exif.size > 0)) {
@@ -1730,15 +1733,14 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
         }
         memcpy(exif.data, AVIF_JPEG_EXIF_HEADER, AVIF_JPEG_EXIF_HEADER_LENGTH);
         memcpy(exif.data + AVIF_JPEG_EXIF_HEADER_LENGTH, avif->exif.data + exifTiffHeaderOffset, avif->exif.size - exifTiffHeaderOffset);
-        // Make sure the Exif orientation matches the irot/imir values.
-        // libheif does not have the same behavior. The orientation is applied to samples and orientation data is discarded there,
-        // see https://github.com/strukturag/libheif/blob/ea78603d8e47096606813d221725621306789ff2/examples/encoder_jpeg.cc#L187
-        const uint8_t orientation = avifImageGetExifOrientationFromIrotImir(avif);
-        result = avifSetExifOrientation(&exif, orientation);
+        // We already rotated the pixels if necessary in avifApplyTransforms(), so we set the orientation to 1 (no rotation, no mirror).
+        result = avifSetExifOrientation(&exif, 1);
         if (result != AVIF_RESULT_OK) {
-            // Ignore errors if the orientation is the default one because not being able to set Exif orientation now
-            // means a reader will not be able to parse it later either.
-            if (orientation != 1) {
+            if (result == AVIF_RESULT_INVALID_EXIF_PAYLOAD || result == AVIF_RESULT_NOT_IMPLEMENTED) {
+                // Either the Exif is invalid, or it doesn't have an orientation field.
+                // If it's invalid, we can consider it as equivalent to not having an orientation.
+                // In both cases, we can ignore the error.
+            } else {
                 fprintf(stderr, "Error writing JPEG metadata: %s\n", avifResultToString(result));
                 avifRWDataFree(&exif);
                 goto cleanup;
@@ -1753,12 +1755,6 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
         }
         jpeg_write_marker(&cinfo, JPEG_APP0 + 1, remainingExif.data, (unsigned int)remainingExif.size);
         avifRWDataFree(&exif);
-    } else if (avifImageGetExifOrientationFromIrotImir(avif) != 1) {
-        // There is no Exif yet, but we need to store the orientation.
-        // TODO: https://github.com/AOMediaCodec/libavif/issues/2427 - Add a valid Exif payload or rotate the samples.
-        fprintf(stderr,
-                "Warning: Orientation %u was ignored, the output image was NOT rotated or mirrored\n",
-                avifImageGetExifOrientationFromIrotImir(avif));
     }
 
     if (avif->xmp.data && (avif->xmp.size > 0)) {
@@ -1788,7 +1784,7 @@ avifBool avifJPEGWrite(const char * outputFilename, const avifImage * avif, int 
     }
 
     while (cinfo.next_scanline < cinfo.image_height) {
-        row_pointer[0] = &rgb.pixels[cinfo.next_scanline * rgb.rowBytes];
+        row_pointer[0] = &rgbView.pixels[cinfo.next_scanline * rgbView.rowBytes];
         (void)jpeg_write_scanlines(&cinfo, row_pointer, 1);
     }
 
@@ -1800,6 +1796,6 @@ cleanup:
         fclose(f);
     }
     jpeg_destroy_compress(&cinfo);
-    avifRGBImageFreePixels(&rgb);
+    avifRGBImageFreePixels(&rgbData);
     return ret;
 }

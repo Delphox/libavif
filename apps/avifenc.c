@@ -238,8 +238,8 @@ static void syntaxLong(void)
     printf("                                        Use 2 for any you wish to leave unspecified\n");
     printf("    -r,--range RANGE                  : YUV range, one of 'limited' or 'l', 'full' or 'f'. (JPEG/PNG only, default: full; For y4m or stdin, range is retained)\n");
     printf("    --target-size S                   : Set target file size in bytes (up to 7 times slower)\n");
-    printf("    --progressive                     : EXPERIMENTAL: Automatically set parameters to encode a simple layered image supporting progressive rendering from a single input frame.\n");
-    printf("    --layered                         : EXPERIMENTAL: Encode a layered AVIF. Each input is encoded as one layer and at most %d layers can be encoded.\n",
+    printf("    --progressive                     : Automatically set parameters to encode a simple layered image supporting progressive rendering from a single input frame.\n");
+    printf("    --layered                         : Encode a layered AVIF. Each input is encoded as one layer and at most %d layers can be encoded.\n",
            AVIF_MAX_AV1_LAYER_COUNT);
     printf("    -g,--grid MxN                     : Encode a single-image grid AVIF with M cols & N rows. Either supply MxN identical W/H/D images, or a single\n");
     printf("                                        image that can be evenly split into the MxN grid and follow AVIF grid image restrictions. The grid will adopt\n");
@@ -299,7 +299,7 @@ static void syntaxLong(void)
     printf("    --max QP                          : Deprecated, use -q 0..100 instead\n");
     printf("    --minalpha QP                     : Deprecated, use --qalpha 0..100 instead\n");
     printf("    --maxalpha QP                     : Deprecated, use --qalpha 0..100 instead\n");
-    printf("    --scaling-mode N[/D]              : EXPERIMENTAL: Set frame (layer) scaling mode as given fraction. If omitted, the denominator defaults to 1. (Default: 1/1)\n");
+    printf("    --scaling-mode N[/D]              : Set frame (layer) scaling mode as given fraction. If omitted, the denominator defaults to 1. (Default: 1/1)\n");
     printf("    --duration D                      : Frame durations (in timescales) (default: 1). This option always applies to following inputs with or without the `:u` suffix.\n");
     printf("    -a,--advanced KEY[=VALUE]         : Pass an advanced, codec-specific key/value string pair directly to the codec. avifenc will warn on any not used by the codec.\n");
     printf("\n");
@@ -321,7 +321,7 @@ static void syntaxLong(void)
         printf("    end-usage=MODE                    : Rate control mode, one of 'vbr', 'cbr', 'cq', or 'q'\n");
         printf("    sharpness=S                       : Bias towards block sharpness in rate-distortion optimization of transform coefficients in 0..7. (Default: 0)\n");
         printf("    tune=METRIC                       : Tune the encoder for distortion metric, one of 'psnr', 'ssim' or 'iq'.\n");
-        printf("                                        (Default for color: ssim, default for alpha: psnr)\n");
+        printf("                                        (Default for color: still non-RGB images (libaom v3.13.0+): iq, otherwise: ssim; default for alpha: psnr)\n");
         printf("    film-grain-test=TEST              : Film grain test vectors in 0..16. 0=none (default), 1=test1, 2=test2, ... 16=test16\n");
         printf("    film-grain-table=FILENAME         : Path to file containing film grain parameters\n");
         printf("\n");
@@ -2590,7 +2590,6 @@ int main(int argc, char * argv[])
             fprintf(stderr, "ERROR: Not enough input files for grid image! (expecting %u, or a single image to be split)\n", gridCellCount);
             goto cleanup;
         }
-        // TODO(yguyon): Check if it is possible to use frames from a single input file as grid cells. Maybe forbid it.
     }
 
     const char * lossyHint = " (Lossy)";

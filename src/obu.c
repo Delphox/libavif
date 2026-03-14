@@ -41,6 +41,7 @@
 
 #if defined(AVIF_CODEC_AVM)
 // TODO: b/398931194 - Remove specific codec includes once AV2 is released.
+#include "av2/common/enums.h"
 #include "avm/avm_codec.h"
 #include "config/avm_config.h"
 #endif
@@ -151,10 +152,14 @@ static uint32_t avifBitsReadRG(avifBits * const bits, const uint32_t n)
 //
 // Originally dav1d's parse_seq_hdr() function (heavily modified and split)
 
-static avifBool parseSequenceHeaderProfile(avifBits * bits, avifSequenceHeader * header)
+static avifBool parseSequenceHeaderProfile(avifBits * bits, uint32_t numBits, avifSequenceHeader * header)
 {
-    uint32_t seq_profile = avifBitsRead(bits, 3);
+    uint32_t seq_profile = avifBitsRead(bits, numBits);
+#if defined(CONFIG_AV2_PROFILES) && CONFIG_AV2_PROFILES
+    if (seq_profile > 5) {
+#else
     if (seq_profile > 2) {
+#endif
         return AVIF_FALSE;
     }
     header->av1C.seqProfile = (uint8_t)seq_profile;
@@ -434,7 +439,7 @@ static avifBool parseAV2ChromaFormatBitdepth(avifBits * bits, avifSequenceHeader
 
 static avifBool parseAV1SequenceHeader(avifBits * bits, avifSequenceHeader * header)
 {
-    AVIF_CHECK(parseSequenceHeaderProfile(bits, header));
+    AVIF_CHECK(parseSequenceHeaderProfile(bits, 3, header));
     AVIF_CHECK(parseSequenceHeaderLevelIdxAndTier(bits, header));
 
     AVIF_CHECK(parseSequenceHeaderFrameMaxDimensions(bits, header));
@@ -461,7 +466,7 @@ static avifBool parseAV2SequenceHeader(avifBits * bits, avifSequenceHeader * hea
         return AVIF_FALSE;
     }
 
-    AVIF_CHECK(parseSequenceHeaderProfile(bits, header));
+    AVIF_CHECK(parseSequenceHeaderProfile(bits, PROFILE_BITS, header));
     header->reduced_still_picture_header = (uint8_t)avifBitsRead(bits, 1); // single_picture_header_flag
     if (!header->reduced_still_picture_header) {
         avifBitsRead(bits, 3); // seq_lcr_id
@@ -526,7 +531,7 @@ static avifBool parseAV2ContentInterpretation(avifBits * bits, avifSequenceHeade
             // BT.709 SDR
             header->colorPrimaries = AVIF_COLOR_PRIMARIES_BT709;                   // 1
             header->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_BT709; // 1
-            header->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT470BG;         // 5
+            header->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT709;           // 1
         } else if (colorDescriptionIdc == 2) {
             // BT.2100 PQ
             header->colorPrimaries = AVIF_COLOR_PRIMARIES_BT2100;               // 9
@@ -534,9 +539,9 @@ static avifBool parseAV2ContentInterpretation(avifBits * bits, avifSequenceHeade
             header->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;   // 9
         } else if (colorDescriptionIdc == 3) {
             // BT.2100 HLG
-            header->colorPrimaries = AVIF_COLOR_PRIMARIES_BT2100;                         // 9
-            header->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_BT2020_10BIT; // 14
-            header->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;             // 9
+            header->colorPrimaries = AVIF_COLOR_PRIMARIES_BT2100;                // 9
+            header->transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_HLG; // 18
+            header->matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT2020_NCL;    // 9
         } else if (colorDescriptionIdc == 4) {
             // sRGB
             header->colorPrimaries = AVIF_COLOR_PRIMARIES_BT709;                  // 1
