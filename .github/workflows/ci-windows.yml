@@ -103,7 +103,7 @@ jobs:
           .\avifenc.exe --help
       - name: Verify longPathAware
         run: >
-          Get-ChildItem -Recurse -Filter *.vbs | Select-Object -ExpandProperty FullName
+          Get-ChildItem -Recurse -Filter *.exe | Select-Object -ExpandProperty FullName
         
           New-Item -ItemType "Directory" -Name "verylongpath 000000010 000000020 000000030 000000040
           000000050\000000060 000000070 000000080 000000090 000000100\000000110 000000120 000000130
